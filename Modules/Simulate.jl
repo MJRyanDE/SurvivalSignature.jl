@@ -605,12 +605,12 @@ function plotSampleSpace(
 
     # Add title and display
     if !isnothing(methods)
-        if !isnothing(methods.additional_points)
+        if !isnothing(additional_points)
             Plots.plot!(;
-                title="Sample Space - $(nameof(typeof(method.centers_method))) - $(nameof(typeof(method.adaptive_refinement_method)))",
+                title="Sample Space - $(nameof(typeof(methods.centers_method))) - $(nameof(typeof(methods.adaptive_refinement_method)))",
             )
         else
-            Plots.plot!(; title="Sample Space - $(nameof(typeof(method.centers_method)))")
+            Plots.plot!(; title="Sample Space - $(nameof(typeof(methods.centers_method)))")
         end
     else
         Plots.plot!(; title="Sample Space")

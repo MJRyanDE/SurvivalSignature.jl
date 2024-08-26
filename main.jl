@@ -38,8 +38,8 @@ function main()
     system_type::SystemMethod = GridSystem((15, 15))
 
     # Simulation Parameters
-    samples::Union{Int,Vector{Int}} = [100, 500, 1000]        # number of samples
-    covtol::Float64 = 1e-3                       # coeficient of varriation tolerance
+    samples::Union{Int,Vector{Int}} = 100        # number of samples
+    covtol::Float64 = 1e-3                       # coefficient of variation tolerance
     wtol::Float64 = 1e-3                         # weight change tolerance
 
     ci::Vector{Int} = [15, 15]                   # centers interval - dims must match 
@@ -51,7 +51,9 @@ function main()
     # [ GridStart() ]
     starting_points_method::StartingMethod = GridStart()
     # [ GridCenters(), Greedy(), GeometricGreedy(), Leja() ]
-    centers_method::Union{Vector{CentersMethod},CentersMethod} = [Leja(), GridCenters(ci)]
+    centers_method::Union{Vector{CentersMethod},CentersMethod} = [
+        GridCenters(ci), Greedy(prod(ci)), GeometricGreedy(prod(ci)), Leja(prod(ci))
+    ]
 
     # [ NORM(), NRMSE() ]
     weight_change_method::Union{Vector{ErrorType},ErrorType} = NORM()
@@ -165,8 +167,9 @@ function main()
             adaptive_refinement_times[i] = metric.time.adaptive_refinement
         end
         SurvivalSignatureUtils._print(adaptive_refinement_times; digits=6)
+        println("")
         # =========================== Iterations ===================================
-        println("Iterations:")
+        println("\tIterations:")
         iterations = Array{Int}(undef, size(metrics))
         for (i, metric) in enumerate(metrics)
             iterations[i] = metric.iterations
@@ -174,7 +177,7 @@ function main()
         SurvivalSignatureUtils._print(iterations)
         println("")
 
-        println("Time per Iteration (s):")
+        println("\tTime per Iteration (s):")
         iteration_times = adaptive_refinement_times ./ iterations
 
         SurvivalSignatureUtils._print(iteration_times; digits=6)
