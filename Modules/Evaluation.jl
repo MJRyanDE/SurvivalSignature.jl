@@ -14,7 +14,7 @@ using ..BasisFunction
 include("../src/signature.jl")
 
 # ==============================================================================
-export computeSurvivalSignatureEntry, generateStateVectors, evaluate
+export computeSurvivalSignatureEntry, generateStateVectors, evaluate, evaluateSurrogate
 # ==============================================================================
 
 function evaluate(model::Model)::Model
@@ -35,6 +35,23 @@ function evaluate(model::Model)::Model
     return model
 end
 
+function evaulate(
+    coordinates::Union{Array{Float64},Array{Int}},
+    weights::Array{Float64},
+    shape_parameter::Float64,
+    centers::Matrix{Float64},
+    method::Method,
+)
+    solutions = zeros(Float64, size(coordinates, 2))
+
+    for (idx, coordinate::Vector) in enumerate(eachcol(coordinates))
+        solutions[idx] = evaluateSurrogate(
+            coordinate, weights, shape_parameter, centers, method
+        )
+    end
+    return solutions
+end
+
 function evaluateSurrogate(
     state_vector::Vector,
     weights::Array,
@@ -48,30 +65,24 @@ function evaluateSurrogate(
 
     s = (basis * weights)[1]
 
-    # if s <= 0.0
-    #     println("State Vector: $state_vector")
-    #     println("Shape Parameter: $shape_parameter")
-    #     println("Prediction: $s")
-    # end
-
     # fit between 0 and 1 
     return min(max(s, 0.0), 1.0)
 end
 
 function computeSurvivalSignatureEntry(
-    sys::System, sim::Simulation, state_vector::Array{<:Number}
+    sys::System, sim::Simulation, state_vector::Array{<:Number}; verbose::Bool=false
 )
     components_per_type = groupComponents(sys.types)
 
-    y = @showprogress desc = "\tComputing..." map(eachcol(state_vector)) do x
+    progress = verbose ? Progress(size(state_vector, 2); desc="\tComputing...") : nothing
+
+    y = map(eachcol(state_vector)) do x
         entry = CartesianIndex(Int.(x)...)
         num_combinations = numberofcombinations(components_per_type, entry)
 
         if num_combinations <= sim.samples
             # Exact value with coefficient of variation 0
-            return SurvivalSignature.exactentry(
-                entry, sys.adj, sys.types, sys.connectivity
-            ),
+            return SurvivalSignature.exactentry(entry, sys.adj, sys.types, sys.connectivity),
             0.0
         else
             # Approximate value with calculated coefficient of variation
@@ -84,6 +95,14 @@ function computeSurvivalSignatureEntry(
                 sim.variation_tolerance,
             )
         end
+
+        if verbose
+            next!(progress)
+        end
+    end
+
+    if verbose
+        finish!(progress)
     end
 
     # unpack the tuple

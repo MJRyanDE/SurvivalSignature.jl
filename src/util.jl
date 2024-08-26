@@ -9,7 +9,7 @@ function gridnetwork(n::Int, m::Int)
 
     A[diagind(A, n)] .= 1
 
-    return A += transpose(A)
+    return Int.(A .+ transpose(A))  # transpose converts to Float64, but this is unnessesary memory use.
 end
 
 function random_network(n::Int, p::Real)

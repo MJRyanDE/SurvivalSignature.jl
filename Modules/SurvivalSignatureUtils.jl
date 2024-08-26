@@ -1,35 +1,59 @@
 module SurvivalSignatureUtils
 
-# Function to ensure input array is treated as a column array
+__precompile__()
+
 function ensure_column_array!(arr::Array)
-    if size(arr, 1) > 1 && size(arr, 2) > 1
-        transpose(arr)
+    # If it's a 1D array, reshape it into a column vector
+    if ndims(arr) == 1
+        return reshape(arr, :, 1)  # Reshape into a column vector
+    elseif size(arr, 1) == 1
+        return transpose(arr)  # Convert a row vector to a column vector
     end
     return arr
 end
 
 # Function to ensure input array is treated as a row array
 function ensure_row_array!(arr::Array)
-    if size(arr, 1) > 1 && size(arr, 2) > 1
-        arr[:] = transpose(arr)
+    # If it's a 1D array, reshape it into a row vector
+    if ndims(arr) == 1
+        return reshape(arr, 1, :)  # Reshape into a row vector
+    elseif size(arr, 2) == 1
+        return transpose(arr)  # Convert a column vector to a row vector
     end
     return arr
 end
 
 # Define a function to print a matrix
-function _print(matrix::Matrix)
+function _print(matrix::Matrix; digits=4)
     rows = [eachrow(matrix)...]
-    return _print(rows)
+    return _print(rows; digits=digits)
+end
+
+# Define a function to print a matrix
+function _print(vector::Union{Vector{Float64},Vector{Int}}; digits=4)
+    vector = ensure_row_array!(vector)
+
+    rows = [eachrow(vector)...]
+    return _print(rows; digits=digits)
+end
+
+function _print(dict_vector::Vector{<:Dict}; digits=4)
+    rows = [[dict for dict in dict_vector]]
+
+    return _print(rows; digits=digits)
 end
 
 # Define a function to print an array of rows
-function _print(rows::Vector{<:AbstractVector})
+function _print(rows::Vector{<:AbstractVector}; digits=4)
     # Determine the max number of lines for any dictionary in the rows
     max_lines_per_dict = maximum([_max_lines(cell) for row in rows for cell in row])
 
     # Calculate the width of each cell based on the widest content
     num_cols = length(rows[1])
-    cell_widths = [maximum([_cell_width(row[col]) for row in rows]) for col in 1:num_cols]
+    cell_widths = [
+        maximum([_cell_width(row[col]; digits=digits) for row in rows]) for
+        col in 1:num_cols
+    ]
     overall_width = sum(cell_widths) + length(cell_widths) * 3 + 1
 
     # Print the top border
@@ -40,7 +64,7 @@ function _print(rows::Vector{<:AbstractVector})
             print("|")
             for (j, cell) in enumerate(row)
                 print(" ")
-                _print(cell, i, cell_widths[j])
+                _print(cell, i, cell_widths[j]; digits=digits)
                 print(" |")
             end
             println()
@@ -60,55 +84,61 @@ function _max_lines(cell)
 end
 
 # Define a helper function to calculate the width of a cell's content
-function _cell_width(cell)
+function _cell_width(cell; digits=4)
     if cell isa Dict
         max_key_length = maximum(length(string(k)) for k in keys(cell))
-        max_val_length = maximum(length(_format_value(v)) for v in values(cell))
+        max_val_length = maximum(
+            length(_format_value(v; digits=digits)) for v in values(cell)
+        )
         return max_key_length + max_val_length + 2 # for ": " between key and value
     else
-        return length(_format_value(cell))
+        return length(_format_value(cell; digits=digits))
     end
 end
 
 # Define a function to print a single cell, either value or dictionary entry
-function _print(cell, line::Int, width::Int)
+function _print(cell, line::Int, width::Int; digits=4)
     if cell isa Dict
         keys_vals = collect(cell)
         if line <= length(keys_vals)
             key, value = keys_vals[line]
-            entry = "$key: $(_format_value(value))"
+            entry = "$key: $(_format_value(value;digits=digits))"
             print(entry * " "^(width - length(entry)))
         else
             print(" "^width)
         end
     else
-        content = _format_value(cell)
+        content = _format_value(cell; digits=digits)
         print(content * " "^(width - length(content)))
     end
 end
 
 # Helper function to format different types of values
-function _format_value(value)
+function _format_value(value; digits=4)
     if value isa Float64
-        return string(round(value; digits=4))
+        return string(round(value; digits=digits))
     else
         return string(value)
     end
 end
 
 # Overload _print for different types
-function _print(value::Union{String,Float64,Int})
-    return print(_format_value(value))
+function _print(value::Union{String,Float64,Int}; digits=4)
+    return print(_format_value(value; digits=digits))
 end
 
-function _print(dict::Dict)
+function _print(dict::Dict; digits=4)
     for (key, value) in dict
-        println("$key: $(_format_value(value))")
+        println("$key: $(_format_value(value; digits=digits))")
     end
 end
 
 function _print(value)
     return print(value)
+end
+
+function _print(value::Union{String,Float64,Int})
+    return println(value)
 end
 
 function print_structure(structure)
@@ -135,7 +165,8 @@ macro examine(var, value_bool::Bool=true)
         println("───────────────────────────────────────")
 
         if $value_bool
-            println("Value: ", $esc_var)  # Print the value directly
+            println("Value:")
+            _print($esc_var)  # Print the value of the variable
         end
 
         if isa($esc_var, AbstractArray)

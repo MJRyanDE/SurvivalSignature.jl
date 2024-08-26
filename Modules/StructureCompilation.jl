@@ -1,5 +1,7 @@
 module StructureCompilation
 
+__precompile__()
+
 using ..Structures: Structures, Methods, Simulation
 using ..Structures:
     SimulationType,
@@ -35,8 +37,9 @@ function compileMethods(
     )
 end
 
+# Simualtion Method
 function compileMethods(
-    sim_method::Vector{SimulationType},
+    sim_method::Vector{<:SimulationType},
     starting_points_method::StartingMethod,
     centers_method::CentersMethod,
     weight_change_method::ErrorType,
@@ -60,9 +63,10 @@ function compileMethods(
     return methods
 end
 
+# Starting Points Method
 function compileMethods(
     sim_method::SimulationType,
-    starting_points_method::Vector{StartingMethod},
+    starting_points_method::Vector{<:StartingMethod},
     centers_method::CentersMethod,
     weight_change_method::ErrorType,
     shape_parameter_method::ShapeParameterMethod,
@@ -85,10 +89,11 @@ function compileMethods(
     return methods
 end
 
+# Centers Method
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,
-    centers_method::Vector{CentersMethod},
+    centers_method::Vector{<:CentersMethod},
     weight_change_method::ErrorType,
     shape_parameter_method::ShapeParameterMethod,
     basis_function_method::BasisFunctionMethod,
@@ -110,11 +115,12 @@ function compileMethods(
     return methods
 end
 
+# Weight Change Method
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,
-    centers_method::Vector{CentersMethod},
-    weight_change_method::ErrorType,
+    centers_method::CentersMethod,
+    weight_change_method::Vector{<:ErrorType},
     shape_parameter_method::ShapeParameterMethod,
     basis_function_method::BasisFunctionMethod,
     adaptive_refinement_method::AdaptiveRefinementMethod,
@@ -135,12 +141,13 @@ function compileMethods(
     return methods
 end
 
+# Shape Parameter Method
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,
     centers_method::CentersMethod,
     weight_change_method::ErrorType,
-    shape_parameter_method::Vector{ShapeParameterMethod},
+    shape_parameter_method::Vector{<:ShapeParameterMethod},
     basis_function_method::BasisFunctionMethod,
     adaptive_refinement_method::AdaptiveRefinementMethod,
 )
@@ -160,13 +167,14 @@ function compileMethods(
     return methods
 end
 
+# Basis Function Method 
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,
     centers_method::CentersMethod,
     weight_change_method::ErrorType,
     shape_parameter_method::ShapeParameterMethod,
-    basis_function_method::Vector{BasisFunctionMethod},
+    basis_function_method::Vector{<:BasisFunctionMethod},
     adaptive_refinement_method::AdaptiveRefinementMethod,
 )
     methods = Vector{Methods}(undef, length(basis_function_method))
@@ -185,6 +193,7 @@ function compileMethods(
     return methods
 end
 
+# Adaptive Refinement Method
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,
@@ -192,7 +201,7 @@ function compileMethods(
     weight_change_method::ErrorType,
     shape_parameter_method::ShapeParameterMethod,
     basis_function_method::BasisFunctionMethod,
-    adaptive_refinement_method::Vector{AdaptiveRefinementMethod},
+    adaptive_refinement_method::Vector{<:AdaptiveRefinementMethod},
 )
     methods = Vector{Methods}(undef, length(adaptive_refinement_method))
     for (i, method) in enumerate(adaptive_refinement_method)

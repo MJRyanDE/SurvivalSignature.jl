@@ -1,5 +1,7 @@
 module StartingPoints
 
+__precompile__()
+
 # ==============================================================================
 
 using NearestNeighbors
@@ -25,7 +27,7 @@ function generateStartingPoints(method::GridStart, state_vectors::Matrix, types:
 
     tree = NearestNeighbors.KDTree(state_vectors)
 
-    ranges = [range(0.0, 1.0; length=l) for l in fill(5, length(types))]  # creates range objects
+    ranges = [range(0.0, 1.0; length=l) for l in fill(5, length(types))]
 
     starting_points = mapreduce(t -> [t...], hcat, IterTools.Iterators.product(ranges...))
 

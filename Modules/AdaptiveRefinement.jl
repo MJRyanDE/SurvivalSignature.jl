@@ -1,15 +1,33 @@
 module AdaptiveRefinement
+
+__precompile__()
+
 # ==============================================================================
+
+using Base.Threads
+using Statistics
+using Distributions
+
+using Optim
+using BlackBoxOptim
+using JuMP
+using Ipopt
+using Evolutionary
 
 using ForwardDiff
 using NearestNeighbors
 using InvertedIndices
 using ProgressMeter
+using LinearAlgebra
 
 # ==============================================================================
 
 using ..SurvivalSignatureUtils
-using ..Structures: Points, System, Simulation, Methods, AdaptiveRefinementMethod
+using ..Structures: BasisFunctionMethod, Gaussian
+using ..Structures: Points, System, Simulation, Methods
+using ..Structures: TEAD, MEPE, LOLA, MIPT, SFCVT, MASA, EI
+using ..Structures: EnumerationX, BlackBoxX, OptimX, SimulatedAnnealingX, EvolutionX
+using ..Structures: NORM, NRMSE
 using ..Evaluation
 using ..BasisFunction
 using ..ShapeParameter
@@ -22,10 +40,29 @@ include("../src/rbf/radialbasisfunctions.jl")
 
 export adaptiveRefinement
 
+# move this later
+function survialSignatureDistanceMatrix(state_vectors::Matrix{Float64})
+    n = size(state_vectors, 2)  # Number of state vectors (columns)
+    DM = zeros(Float64, n, n)   # Initialize the distance matrix
+
+    # Iterate over each pair of columns using eachcol()
+    columns = collect(eachcol(state_vectors))
+
+    for i in 1:n
+        for j in (i + 1):n
+            # Compute the Euclidean distance between column i and column j
+            DM[i, j] = norm(columns[i] - columns[j])
+            DM[j, i] = DM[i, j]  # Symmetric matrix
+        end
+    end
+
+    return DM
+end
+
 # ==============================================================================
 
 function adaptiveRefinement(
-    adaptive_refinement_method::AdaptiveRefinementMethod,
+    adaptive_refinement_method::TEAD,
     total_points::Points,
     evaluated_points::Points,
     sys::System,
@@ -34,21 +71,29 @@ function adaptiveRefinement(
     weights::Array,
     centers::Array,
     constraints::Array,
-    shape_parameter::Float64,
+    shape_parameter::Float64;
+    verbose::Bool=false,
 )
     total_basis = BasisFunction.basis(
         methods.basis_function_method, shape_parameter, total_points.coordinates, centers
     )
 
-    x = evaluated_points # evaluated points
+    x = deepcopy(evaluated_points) # evaluated points
     l_max = maximumLength(total_points)
     candidates, cand_idx = remainingCandidates(total_points, x)
 
-    prog = ProgressMeter.ProgressThresh(
-        sim.weight_change_tolerance, "\tAdaptive Refinement:"
-    )
+    prog = if verbose
+        ProgressMeter.ProgressThresh(sim.weight_change_tolerance, "\tAdaptive Refinement")
+    else
+        nothing
+    end
+
     stop = 0
+    f_max = maximum(evaluated_points.solution)
+    iterations = 0
     while stop < 2 && length(candidates) > 0
+        iterations += 1
+
         function s(a::Points)
             return (BasisFunction.basis(methods.basis_function_method, shape_parameter, a.coordinates, centers) * weights)[1]
         end
@@ -66,16 +111,16 @@ function adaptiveRefinement(
         # hybrid score function
         J = hybridScore(D, R, w)
 
-        optimal_candidate, optimal_idx = optimalPoint(total_points, J, candidates)
+        optimal_candidates, optimal_idx = optimalPoint(total_points, J, candidates)
 
-        true_value, coefficient_variation = Evaluation.computeSurvivalSignatureEntry(
-            sys, sim, optimal_candidate
+        true_values, coefficient_variation = Evaluation.computeSurvivalSignatureEntry(
+            sys, sim, optimal_candidates; verbose=verbose
         )
 
         # update the computed state_vectors
-        x.coordinates = hcat(x.coordinates, optimal_candidate)
+        x.coordinates = hcat(x.coordinates, optimal_candidates)
 
-        x.solution = vcat(x.solution, true_value)
+        x.solution = vcat(x.solution, true_values)
         x.confidence = vcat(x.confidence, coefficient_variation)
         x.idx = vcat(x.idx, optimal_idx)
 
@@ -91,17 +136,31 @@ function adaptiveRefinement(
         # update weights
         weights = lsqr(basis, x.solution, constraints)
 
-        if Error.calculateError(methods.weight_change_method, weights, old_weights) <
-            sim.weight_change_tolerance
+        if isa(methods.weight_change_method, NORM)
+            error_value = calculateError(methods.weight_change_method, weights, old_weights)
+
+        elseif isa(methods.weight_change_method, NRMSE)
+            predicted_values::Vector{Float64} = [
+                (BasisFunction.basis(methods.basis_function_method, shape_parameter, y, centers) * weights)[1]
+                for y::Vector in eachcol(optimal_candidates)
+            ]
+            error_value, f_max = calculateError(
+                methods.weight_change_method, true_values, predicted_values, f_max
+            )
+
+        else
+            error("Unsupported error calculation method")
+        end
+
+        if error_value < sim.weight_change_tolerance
             stop += 1
         else
             stop = 0
         end
 
-        stop != 1 && ProgressMeter.update!(
-            prog,
-            Error.calculateError(methods.weight_change_method, weights, old_weights),
-        )
+        if prog !== nothing
+            ProgressMeter.update!(prog, error_value)
+        end
     end
 
     upper_bound = min.(x.solution .+ (x.solution .* x.confidence), 1.0)
@@ -110,7 +169,11 @@ function adaptiveRefinement(
     replace!(upper_bound, NaN => 1 / (sim.samples + 1))
     replace!(lower_bound, NaN => 0.0)
 
-    return x, weights, upper_bound, lower_bound
+    if verbose
+        println("\tRequired Iterations: ", iterations)
+    end
+
+    return x, weights, upper_bound, lower_bound, iterations
 end
 
 function explorationScore(x::Points, candidates::Matrix)
@@ -125,7 +188,7 @@ function exploitationScore(
     func::Function,
     weights::Array,
     candidates::Array,
-    cand_idx::InvertedIndex,
+    cand_idx::Array,
     nearest_neighbor_idx::Array,
 )
     # Combine coordinates and solutions for local function s(a)
@@ -182,28 +245,1079 @@ end
 
 function optimalPoint(Ω::Points, scores::Array, candidates::Array)
     _, idx = findmax(scores)
-    optimal_candidate = candidates[:, idx]  # optimal candidate (state_vector)
+    optimal_candidates = candidates[:, idx]  # optimal candidate (state_vector)
 
     # convert from the candidates index to the equivalent Ω index
-    optimal_candidate_idx = findfirst(
-        x -> all(x .== optimal_candidate), eachcol(Ω.coordinates)
+    optimal_candidates_idx = findfirst(
+        x -> all(x .== optimal_candidates), eachcol(Ω.coordinates)
     )
 
-    return optimal_candidate, optimal_candidate_idx
+    return optimal_candidates, optimal_candidates_idx
 end
 
 function remainingCandidates(Ω::Points, x::Points)
-
     # remaining values
+
     cand_idx = InvertedIndices.Not(x.idx)
     candidates = Ω.coordinates[:, cand_idx]
+
+    # convert from InvertedIndices to Array
+    all_indices = 1:size(Ω.coordinates, 2)
+    cand_idx = filter(i -> !(i in x.idx), all_indices)
 
     return candidates, cand_idx
 end
 
-function remainingCandidates(candidates::Array, remove_points::Array)
+function remainingCandidates(candidates::Array, remove_points::Array, cand_idx::Array)
     candidates = candidates[.!in.(1:size(candidates, 1), Ref(remove_points)), :]
+    cand_idx = cand_idx[.!in.(cand_idx, Ref(remove_points))]
     return candidates, cand_idx
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(
+    method::MEPE,
+    total_points::Points,
+    evaluated_points::Points,
+    sys::System,
+    sim::Simulation,
+    methods::Methods,
+    weights::Array,
+    centers::Array,
+    constraints::Array,
+    shape_parameter::Float64;
+    verbose::Bool=false,
+)
+    x = deepcopy(evaluated_points)
+
+    x, iterations = mepe(
+        sys,
+        sim,
+        x,
+        total_points,
+        weights,
+        centers,
+        constraints,
+        shape_parameter,
+        methods;
+        verbose=verbose,
+    )
+
+    upper_bound = min.(x.solution .+ (x.solution .* x.confidence), 1.0)
+    lower_bound = max.(x.solution .- (x.solution .* x.confidence), 0.0)
+
+    replace!(upper_bound, NaN => 1 / (sim.samples + 1))
+    replace!(lower_bound, NaN => 0.0)
+
+    if verbose
+        println("\tRequired Iterations: ", iterations)
+    end
+
+    return x, weights, upper_bound, lower_bound, iterations
+end
+
+function mepe(
+    sys::System,
+    sim::Simulation,
+    evaluated_points::Points,
+    total_points::Points,
+    weights::Array,
+    centers::Array,
+    constraints::Array,
+    shape_parameter::Float64,
+    methods::Methods;
+    verbose::Bool=false,
+)
+    basis = BasisFunction.basis(
+        methods.basis_function_method,
+        shape_parameter,
+        evaluated_points.coordinates,
+        centers,
+    )
+
+    distance_matrix = survialSignatureDistanceMatrix(evaluated_points.coordinates)
+
+    R = rbfCorrelationMatrix(distance_matrix, shape_parameter)
+    invR = inv(R)
+
+    q::Int = 1
+    alpha = 0.5
+    f_max = maximum(evaluated_points.solution)
+    cross_validation_error_array = fastCrossValidationErrorArray(
+        basis, invR, evaluated_points.solution
+    )
+    candidates, cand_idx = remainingCandidates(total_points, evaluated_points)
+
+    while true
+        new_point = chooseNewPointMEPE(
+            candidates,
+            evaluated_points.coordinates,
+            invR,
+            shape_parameter,
+            alpha,
+            cross_validation_error_array,
+        )
+
+        prediction, confidence = Evaluation.computeSurvivalSignatureEntry(
+            sys, sim, new_point; verbose=verbose
+        )
+
+        matching_index = findfirst(x -> all(x .== new_point), eachcol(candidates))#
+
+        evaluated_points.coordinates = hcat(evaluated_points.coordinates, new_point)
+        evaluated_points.solution = vcat(evaluated_points.solution, prediction)
+        evaluated_points.confidence = vcat(evaluated_points.confidence, confidence)
+        evaluated_points.idx = vcat(evaluated_points.idx, cand_idx[matching_index])
+
+        # update cross_validation_array and balance_factor
+        candidates, cand_idx = remainingCandidates(total_points, evaluated_points)
+
+        basis = BasisFunction.basis(
+            methods.basis_function_method,
+            shape_parameter,
+            evaluated_points.coordinates,
+            centers,
+        )
+
+        distance_matrix = survialSignatureDistanceMatrix(evaluated_points.coordinates)
+        R = rbfCorrelationMatrix(distance_matrix, shape_parameter)
+        invR = inv(R)
+        cross_validation_error_array = fastCrossValidationErrorArray(
+            basis, invR, evaluated_points.solution
+        )
+
+        true_error = abs(
+            evaluated_points.solution[end] - Evaluation.evaluateSurrogate(
+                evaluated_points.coordinates[:, end],
+                weights,
+                shape_parameter,
+                centers,
+                methods,
+            ),
+        )
+
+        alpha = balanceFactor(true_error, cross_validation_error_array[end])
+        q += 1
+        # update model and check stopping criteria:
+
+        old_weights = weights
+
+        basis = BasisFunction.basis(
+            methods.basis_function_method,
+            shape_parameter,
+            evaluated_points.coordinates,
+            centers,
+        )
+
+        weights = lsqr(basis, evaluated_points.solution, constraints)
+
+        if isa(methods.weight_change_method, NORM)
+            error_value = calculateError(methods.weight_change_method, weights, old_weights)
+
+        elseif isa(methods.weight_change_method, NRMSE)
+            predicted_values::Vector{Float64} = [
+                (BasisFunction.basis(methods.basis_function_method, shape_parameter, y, centers) * weights)[1]
+                for y::Vector in eachcol(new_point)
+            ]
+            error_value, f_max = calculateError(
+                methods.weight_change_method, prediction, predicted_values, f_max
+            )
+
+        else
+            error("Unsupported error calculation method")
+        end
+
+        if error_value < sim.weight_change_tolerance
+            break
+        end
+    end
+    return evaluated_points, q
+end
+
+function balanceFactor(true_error::Float64, cross_validation_error::Float64)
+    alpha = 0.99 * min(1, 0.5 * (true_error^2 / cross_validation_error))
+    return alpha
+end
+
+function chooseNewPointMEPE(
+    candidates::Matrix{Float64},
+    existing_points::Matrix{Float64},
+    invR::Matrix,
+    shape_parameter::Float64,
+    alpha::Float64,
+    cross_validation_error_array::Vector{Float64},
+)::Vector{Float64}
+
+    # uses Enumeration to find the optimal point - potentially slow.
+    optimal_point = zeros(size(candidates, 1))
+    optimal_score = -Inf
+    lock_obj = ReentrantLock()
+
+    candidate_columns = collect(eachcol(candidates))
+
+    @threads for candidate::Vector in candidate_columns
+        epe = computeEPE(
+            candidate,
+            existing_points,
+            invR,
+            shape_parameter,
+            alpha,
+            cross_validation_error_array,
+        )
+        lock(lock_obj) do
+            if epe > optimal_score
+                optimal_score = epe
+                optimal_point = candidate
+            end
+        end
+    end
+
+    return optimal_point
+end
+
+function computeGlobalExploration(
+    candidate::Vector,
+    existing_points::Matrix,
+    invR::Matrix,
+    shape_parameter::Float64,
+    sigma2::Float64,
+)::Float64
+
+    # prediction variance 
+    r_x = reshape(
+        [
+            exp(-shape_parameter * norm(candidate .- x)) for
+            x::Vector in eachcol(existing_points)
+        ],
+        :,
+        1,
+    )
+
+    global_exploration_term = (sigma2 * (1 .- r_x' * invR * r_x))[1]   # convert from Matrix to Float64
+
+    return global_exploration_term #s^2(x)
+end
+
+function computeEPE(
+    candidate::Vector,
+    existing_points::Matrix,
+    invR::Matrix,
+    shape_parameter::Float64,
+    alpha::Float64,
+    cross_validation_error_array::Vector,
+)
+    distances = [norm(candidate .- existing_points[i]) for i in 1:size(existing_points, 2)]
+    nearest_neighbor_idx = argmin(distances)
+    e2_cv_x = cross_validation_error_array[nearest_neighbor_idx]
+
+    s2_x = computeGlobalExploration(
+        candidate, existing_points, invR, shape_parameter, e2_cv_x
+    )
+
+    epe = alpha * e2_cv_x + (1 - alpha) * s2_x
+
+    return epe
+end
+
+function rbfCorrelationMatrix(
+    distance_matrix::Matrix{Float64},
+    shape_parameter::Float64;
+    method::BasisFunctionMethod=Gaussian(),
+)
+    return BasisFunction.basis(method, shape_parameter, distance_matrix)
+end
+
+function fastCrossValidationErrorArray(F::Matrix, invR::Matrix, solutions::Vector{Float64})
+    # created by Sundarajan and Keerthi,
+
+    # Step 1: Calculate beta_hat
+    beta_hat = inv(F' * F) * F' * solutions
+
+    # Step 2: Calculate d = y_D - F * beta_hat
+    d = solutions - F * beta_hat
+
+    # Step 3: Calculate H = F * inv(F' * F) * F'
+    H = F * inv(F' * F) * F'
+
+    # Step 4: Initialize an array for CV errors
+    cross_validation_error_array = zeros(length(solutions))
+    # Step 5: Calculate cross-validation error for each point
+    for i in 1:length(solutions)
+        # Extract relevant components
+        R_inv_i = invR[i, :]  # i-th row of R_inv
+        H_ii = H[i, i]  # diagonal element of H
+        H_col_i = H[:, i]  # i-th column of H
+        d_i = d[i]  # i-th element of d
+
+        # Calculate the CV error using the formula
+        numerator = dot(R_inv_i, d + H_col_i * d_i / (1 - H_ii))
+        denominator = invR[i, i]
+        cross_validation_error_array[i] = (numerator / denominator)^2
+    end
+
+    return cross_validation_error_array
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(
+    method::EI,
+    total_points::Points,
+    evaluated_points::Points,
+    sys::System,
+    sim::Simulation,
+    methods::Methods,
+    weights::Array,
+    centers::Array,
+    constraints::Array,
+    shape_parameter::Float64;
+    verbose::Bool=false,
+)
+    x = deepcopy(evaluated_points)
+
+    candidates, cand_idx = remainingCandidates(total_points, x)
+
+    prog = if verbose
+        ProgressMeter.ProgressThresh(sim.weight_change_tolerance, "\tAdaptive Refinement")
+    else
+        nothing
+    end
+
+    f_max = 0.0
+    iterations = 0
+    stop = 0
+    while stop < 2 && length(candidates) > 0
+        iterations += 1
+        y_min = minimum(x.solution)
+
+        optimal_point = ei(candidates, y_min, weights, shape_parameter, centers, methods)
+
+        true_value, coefficient_variation = Evaluation.computeSurvivalSignatureEntry(
+            sys, sim, optimal_point; verbose=verbose
+        )
+
+        optimal_idx = findfirst(
+            x -> all(x .== optimal_point), eachcol(total_points.coordinates)
+        )
+
+        if isnothing(optimal_idx)
+            # the optimization is capable of finding the same point multiple times
+            # this is a workaround to ensure that the same point is not added multiple times
+            continue
+            # in this case it is important to note that the iterations will not equal 
+            # the number of additional points.
+        end
+
+        # update the computed state_vectors
+        x.coordinates = hcat(x.coordinates, optimal_point)
+
+        x.solution = vcat(x.solution, true_value)
+        x.confidence = vcat(x.confidence, coefficient_variation)
+        x.idx = vcat(x.idx, optimal_idx)
+
+        candidates, cand_idx = remainingCandidates(total_points, x)
+
+        old_weights = weights
+
+        # recompute the basis Function
+        basis = BasisFunction.basis(
+            methods.basis_function_method, shape_parameter, x.coordinates, centers
+        )
+
+        # update weights
+        weights = lsqr(basis, x.solution, constraints)
+
+        if isa(methods.weight_change_method, NORM)
+            error_value = calculateError(methods.weight_change_method, weights, old_weights)
+
+        elseif isa(methods.weight_change_method, NRMSE)
+            predicted_values::Vector{Float64} = [
+                (BasisFunction.basis(methods.basis_function_method, shape_parameter, y, centers) * weights)[1]
+                for y::Vector in eachcol(optimal_candidates)
+            ]
+            error_value, f_max = calculateError(
+                methods.weight_change_method, true_values, predicted_values, f_max
+            )
+
+        else
+            error("Unsupported error calculation method")
+        end
+
+        if error_value < sim.weight_change_tolerance
+            stop += 1
+        else
+            stop = 0
+        end
+
+        if prog !== nothing
+            ProgressMeter.update!(prog, error_value)
+        end
+    end
+
+    upper_bound = min.(x.solution .+ (x.solution .* x.confidence), 1.0)
+    lower_bound = max.(x.solution .- (x.solution .* x.confidence), 0.0)
+
+    replace!(upper_bound, NaN => 1 / (sim.samples + 1))
+    replace!(lower_bound, NaN => 0.0)
+
+    if verbose
+        println("\tRequired Iterations: ", iterations)
+    end
+
+    return x, weights, upper_bound, lower_bound, iterations
+end
+
+function ei(candidates, y_min, weights, shape_parameter, centers, methods)
+    best_score = -Inf
+    best_candidate = nothing
+    lock_obj = ReentrantLock()
+
+    candidate_columns = collect(eachcol(candidates))
+
+    @threads for candidate::Vector in candidate_columns
+        ei = expectedImprovement(
+            candidate, y_min, weights, shape_parameter, centers, methods
+        )
+
+        lock(lock_obj) do
+            if ei > best_score
+                best_score = ei
+                best_candidate = candidate
+            end
+        end
+    end
+
+    return best_candidate
+end
+
+function expectedImprovement(candidate, y_min, weights, shape_parameter, centers, methods)
+    prediction = Evaluation.evaluateSurrogate(
+        candidate, weights, shape_parameter, centers, methods
+    )
+
+    dists = [norm(candidate - c) for c in eachcol(centers)]
+    sigma = maximum(dists) * 0.1                    # simple heuristic for the moment.
+
+    z = (y_min - prediction) / sigma
+
+    cdf_value = Distributions.cdf(Normal(0, 1), z)
+    pdf_value = Distributions.pdf(Normal(0, 1), z)
+
+    expected_improvement = sigma * (z * cdf_value + pdf_value)
+
+    return expected_improvement
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(method::LOLA)
+    return nothing
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(
+    adaptive_refinement_method::MIPT,
+    total_points::Points,
+    evaluated_points::Points,
+    sys::System,
+    sim::Simulation,
+    methods::Methods,
+    weights::Array,
+    centers::Array,
+    constraints::Array,
+    shape_parameter::Float64;
+    verbose::Bool=false,
+)
+    x = deepcopy(evaluated_points)
+
+    # chose optimal candidates based on the MIPT methodology
+    # finds the X best candidates, based on user input. 
+    optimal_candidates, optimal_indices, num_additional_points = mipt(
+        adaptive_refinement_method, total_points, x; verbose=verbose
+    )
+
+    # compute the 'true values' and coefficient of variation
+    true_values, coefficient_variation = Evaluation.computeSurvivalSignatureEntry(
+        sys, sim, optimal_candidates; verbose=verbose
+    )
+
+    # update the computed state_vectors
+    x.coordinates = hcat(x.coordinates, optimal_candidates)
+
+    x.solution = vcat(x.solution, true_values)
+    x.confidence = vcat(x.confidence, coefficient_variation)
+    x.idx = vcat(x.idx, optimal_indices)
+
+    # recompute the basis Function
+    basis = BasisFunction.basis(
+        methods.basis_function_method, shape_parameter, x.coordinates, centers
+    )
+
+    # update weights
+    weights = lsqr(basis, x.solution, constraints)
+
+    upper_bound = min.(x.solution .+ (x.solution .* x.confidence), 1.0)
+    lower_bound = max.(x.solution .- (x.solution .* x.confidence), 0.0)
+
+    replace!(upper_bound, NaN => 1 / (sim.samples + 1))
+    replace!(lower_bound, NaN => 0.0)
+
+    if verbose
+        println("\tRequired Iterations: ", num_additional_points)
+    end
+
+    return x, weights, upper_bound, lower_bound, num_additional_points
+end
+
+function mipt(method::MIPT, total_points::Points, evaluated_points::Points; verbose=verbose)
+    n = size(evaluated_points.coordinates, 2)
+
+    candidates, candidates_idx = remainingCandidates(total_points, evaluated_points)
+
+    num_initial_points = min(method.num_initial_points, size(candidates, 2)) # incase the num_initial_points is 
+    #                                                                        # greater than the number of candidates
+
+    max_bounds = vec(maximum(candidates; dims=2))
+
+    # limit candidates 
+    selected_candidates = candidates[:, rand(1:size(candidates, 2), num_initial_points)]
+
+    intersite_scores = [
+        intersiteProjection(candidate, evaluated_points.coordinates; alpha=method.alpha) for
+        candidate::Vector in eachcol(selected_candidates)
+    ]
+
+    num_additional_points = min(method.num_additional_points, num_initial_points)  # incase the num_additional_points 
+    #                                                                              # is greater than #                                                                              # the number of candidates
+
+    # Sort scores in descending order and get the best scores
+    sorted_indices = sortperm(intersite_scores; rev=true)  # Get indices of sorted scores
+    best_indices = sorted_indices[1:num_additional_points]  # Get indices of the top `num_best_points`
+
+    best_points = selected_candidates[:, best_indices]  # Get the top candidates
+    best_scores = intersite_scores[best_indices]  # Get the top scores
+
+    optimal_points = Matrix{Float64}(undef, size(candidates, 1), num_additional_points)
+    optimal_scores = Vector{Float64}(undef, num_additional_points)
+    optimal_indices = Vector{Int}(undef, num_additional_points)
+
+    # might not work with @threads
+    prog = if verbose
+        Progress(size(best_points, 2); desc="\tAdaptive Refinement")
+    else
+        nothing
+    end
+
+    best_points_scores = collect(enumerate(zip(eachcol(best_points), best_scores)))
+
+    @threads for (i, (best_point::Vector, best_score)) in best_points_scores
+        enumerate(zip(eachcol(best_points), best_scores))
+        d_max = method.beta * best_score / 2
+        # necessary because the state_vectors must be int values because you cant have 
+        # a fraction of a working component. 
+        d_max = max(round(Int, d_max), 1)
+
+        lower_bounds = max.(repeat([0.0], length(best_point)), best_point .- d_max)
+        upper_bounds = min.(max_bounds, best_point .+ d_max)
+
+        # create a range for each dimension
+        ranges = [lower_bounds[i]:upper_bounds[i] for i in eachindex(lower_bounds)]
+
+        # optimize pnew towards -inf Norm of P new on [pnew - dmax, pnew + dmax]
+        best_score = -Inf
+        optimal_score = -Inf
+        optimal_point = zeros(length(best_point))
+
+        for point in Iterators.product(ranges...)
+            point = collect(point) # convert from tuple to vector
+
+            if point in eachcol(evaluated_points.coordinates)
+                continue
+            end
+
+            score = minimum([
+                LinearAlgebra.norm(point - evaluated_points.coordinates[:, i], -Inf) for
+                i in 1:n
+            ])
+
+            if score > best_score
+                optimal_score = score
+                optimal_point = point
+            end
+        end
+
+        if verbose
+            next!(prog)
+        end
+
+        optimal_points[:, i] = optimal_point
+        optimal_scores[i] = optimal_score
+
+        matching_index = findfirst(x -> all(x .== optimal_point), eachcol(candidates)) # index with respect to the #                                                                              # total points 
+
+        if isnothing(matching_index)
+            println("max_bounds: ", max_bounds)
+            println("Optimal point: ", optimal_point)
+            error("Optimal point not found in candidates")
+        end
+
+        optimal_indices[i] = candidates_idx[matching_index]
+    end
+
+    if verbose
+        finish!(prog)
+    end
+
+    return optimal_points, optimal_indices, num_additional_points
+end
+
+function intersiteProjection(
+    candidate::Vector{Float64}, evaluated_points::Matrix{Float64}; alpha::Float64=0.5
+)::Float64
+    n = size(evaluated_points, 2) # evaluated_points is a (2, X) where each column is a point
+
+    # compute a threshold value based on a given tolerance parameter (alpha)
+    d_min = (2 * alpha) / n
+
+    # compute the negative infinity norm of the candidate with respect to the evaluated points
+    LNegInf_dist = minimum([
+        LinearAlgebra.norm(candidate - evaluated_points[:, i], -Inf) for i in 1:n
+    ])
+
+    # intersite_proj_th
+    if d_min >= LNegInf_dist
+        # compute the L2 norm of the candidate with respect to the evaluated points
+        return minimum([
+            LinearAlgebra.norm(candidate - evaluated_points[:, i], 2) for i in 1:n
+        ])
+    else
+        return 0.0
+    end
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(
+    method::SFCVT,
+    total_points::Points,
+    evaluated_points::Points,
+    sys::System,
+    sim::Simulation,
+    methods::Methods,
+    weights::Array,
+    centers::Array,
+    constraints::Array,
+    shape_parameter::Float64;
+    verbose::Bool=false,
+)
+    x = deepcopy(evaluated_points)
+
+    iterations = 0
+    f_max = maximum(evaluated_points.solution)
+
+    prog = if verbose
+        ProgressMeter.ProgressThresh(sim.weight_change_tolerance, "\tAdaptive Refinement")
+    else
+        nothing
+    end
+
+    while true
+        iterations += 1
+        candidates, _ = remainingCandidates(total_points, x)
+
+        # cant get access to the relevant paper for this method
+        # created using the source code from Fuhg et al. 2021
+        errors = relativeLOOCVError(methods, x, centers, shape_parameter, constraints)
+
+        space_filling_metric = spaceFillingMetric(candidates, x.coordinates)
+
+        #errors are considered the solutions in this new model.
+        error_basis = BasisFunction.basis(
+            methods.basis_function_method, shape_parameter, x.coordinates, centers
+        )
+
+        error_weights = lsqr(error_basis, errors, constraints)
+
+        #  optimize using enumeration - less efficient than other solvers, but forces
+        # the solution to be within the constraints and the candidates.
+
+        best_candidate = sfvct(
+            method.method,
+            candidates,
+            x.coordinates,
+            centers,
+            shape_parameter,
+            error_weights,
+            methods,
+            space_filling_metric,
+        )
+
+        optimal_indices = findfirst(
+            x -> all(x .== best_candidate), eachcol(total_points.coordinates)
+        )
+
+        if isnothing(optimal_indices)
+            # the optimization is capable of finding the same point multiple times
+            # this is a workaround to ensure that the same point is not added multiple times
+            continue
+            # in this case it is important to note that the iterations will not equal 
+            # the number of additional points.
+        end
+
+        candidate_solution, coefficient_variation = Evaluation.computeSurvivalSignatureEntry(
+            sys, sim, best_candidate; verbose=verbose
+        )
+
+        x.coordinates = hcat(x.coordinates, best_candidate)
+        x.solution = vcat(x.solution, candidate_solution)
+        x.confidence = vcat(x.confidence, coefficient_variation)
+        x.idx = vcat(x.idx, optimal_indices)
+
+        old_weights = weights
+
+        # recompute the basis Function
+        basis = BasisFunction.basis(
+            methods.basis_function_method, shape_parameter, x.coordinates, centers
+        )
+        # update weights
+        weights = lsqr(basis, x.solution, constraints)
+
+        if isa(methods.weight_change_method, NORM)
+            error_value = calculateError(methods.weight_change_method, weights, old_weights)
+
+        elseif isa(methods.weight_change_method, NRMSE)
+            predicted_values::Vector{Float64} = [
+                (BasisFunction.basis(methods.basis_function_method, shape_parameter, y, centers) * weights)[1]
+                for y::Vector in eachcol(best_candidate)
+            ]
+            error_value, f_max = calculateError(
+                methods.weight_change_method, candidate_solution, predicted_values, f_max
+            )
+
+        else
+            error("Unsupported error calculation method")
+        end
+
+        if error_value < sim.weight_change_tolerance
+            break
+        end
+
+        if prog !== nothing
+            ProgressMeter.update!(prog, error_value)
+        end
+    end
+
+    upper_bound = min.(x.solution .+ (x.solution .* x.confidence), 1.0)
+    lower_bound = max.(x.solution .- (x.solution .* x.confidence), 0.0)
+
+    replace!(upper_bound, NaN => 1 / (sim.samples + 1))
+    replace!(lower_bound, NaN => 0.0)
+
+    if verbose
+        println("\tRequired Iterations: ", iterations)
+    end
+
+    return x, weights, upper_bound, lower_bound, iterations
+end
+
+function sfvct(
+    method::EnumerationX,
+    candidates::Matrix{Float64},
+    evaluated_points::Matrix{Float64},
+    centers::Matrix{Float64},
+    shape_parameter::Float64,
+    error_weights::Array,
+    methods::Methods,
+    space_filling_metric::Float64,
+)
+    best_value = -Inf
+    best_candidate = nothing
+    lock_obj = ReentrantLock()
+
+    # necessary for threading
+    candidate_columns = collect(eachcol(candidates))
+
+    @threads for candidate::Vector in candidate_columns
+        if sfcvtConstraints(candidate, evaluated_points, space_filling_metric) >= 0
+            value = Evaluation.evaluateSurrogate(
+                candidate, error_weights, shape_parameter, centers, methods
+            )
+
+            lock(lock_obj) do
+                if value > best_value
+                    best_value = value
+                    best_candidate = candidate
+                end
+            end
+        end
+    end
+
+    return best_candidate
+end
+
+function sfvct(
+    method::OptimX,
+    candidates::Matrix{Float64},
+    evaluated_points::Matrix{Float64},
+    centers::Matrix{Float64},
+    shape_parameter::Float64,
+    error_weights::Array,
+    methods::Methods,
+    space_filling_metric::Float64,
+)
+    # Define the objective function for optimization
+    function objective(candidate::Vector)
+        candidate = round.(Int, candidate)  # Round to nearest integer
+
+        if sfcvtConstraints(candidate, evaluated_points, space_filling_metric) >= 0
+            return -Evaluation.evaluateSurrogate(
+                candidate, error_weights, shape_parameter, centers, methods
+            )
+        else
+            return Inf  # Penalize infeasible candidates
+        end
+    end
+
+    # Choose the initial candidate (you can modify this selection)
+    midpoint = Statistics.mean(candidates; dims=2)[:, 1]  # Take the mean along each row (dimension)
+    midpoint = Float64.(round.(Int, midpoint))  # Round the midpoint to ensure it's an integer
+
+    # Set bounds (define lower and upper bounds based on your problem)
+    lower_bounds = minimum(candidates; dims=2)[:, 1]  # Set minimum value per dimension
+    upper_bounds = maximum(candidates; dims=2)[:, 1]  # Set maximum value per dimension
+
+    # Optimize using Fminbox with bounds
+    result = optimize(
+        objective, lower_bounds, upper_bounds, midpoint, Fminbox(NelderMead())
+    )
+
+    # Extract the best candidate
+    best_candidate = Optim.minimizer(result)
+
+    best_candidate = round.(Int, best_candidate)  # Round to nearest integer
+
+    return best_candidate
+end
+
+function sfvct(
+    method::BlackBoxX,
+    candidates::Matrix{Float64},
+    evaluated_points::Matrix{Float64},
+    centers::Matrix{Float64},
+    shape_parameter::Float64,
+    error_weights::Array,
+    methods::Methods,
+    space_filling_metric::Float64,
+)
+    # Define the objective function for BlackBoxOptim
+    function objective(candidate::Vector)
+        candidate = round.(Int, candidate)  # Ensure integer candidates
+
+        if sfcvtConstraints(candidate, evaluated_points, space_filling_metric) >= 0
+            return -Evaluation.evaluateSurrogate(
+                candidate, error_weights, shape_parameter, centers, methods
+            )
+        else
+            return Inf  # Penalize infeasible candidates
+        end
+    end
+
+    # Define the search space
+    # Define the search space for each dimension as a tuple of ranges
+    # Define the search space as a vector of tuples (min, max) for each dimension
+    search_space = [
+        (minimum(candidates[d, :]), maximum(candidates[d, :])) for
+        d in 1:size(candidates, 1)
+    ]
+
+    # Optimize using BlackBoxOptim
+    # Method chosen using 'compare_optimizers' function
+    result = bboptimize(
+        objective;
+        SearchRange=search_space,
+        Method=:separable_nes,
+        MaxSteps=5000,
+        TraceMode=:silent,
+    )
+
+    # Extract the best candidate
+    best_candidate = round.(Int, BlackBoxOptim.best_candidate(result))
+
+    return best_candidate
+end
+
+function sfvct(
+    method::SimulatedAnnealingX,
+    candidates::Matrix{Float64},
+    evaluated_points::Matrix{Float64},
+    centers::Matrix{Float64},
+    shape_parameter::Float64,
+    error_weights::Array,
+    methods::Methods,
+    space_filling_metric::Float64,
+)
+    # Define the objective function
+    function objective(candidate::Vector)
+        candidate = round.(Int, candidate)  # Ensure integer candidates
+
+        # Check if candidate satisfies constraints
+        if sfcvtConstraints(candidate, evaluated_points, space_filling_metric) >= 0
+            # Evaluate using the custom surrogate evaluation function
+            return -Evaluation.evaluateSurrogate(
+                candidate, error_weights, shape_parameter, centers, methods
+            )
+        else
+            return Inf  # Penalize infeasible candidates
+        end
+    end
+
+    # Set the initial candidate (could also be random or predefined)
+    midpoint = Statistics.mean(candidates; dims=2)[:, 1]  # Take the mean along each row (dimension)
+    midpoint = Float64.(round.(Int, midpoint))  # Round the midpoint to ensure it's an integer
+
+    result = Optim.optimize(
+        objective, midpoint, Optim.SimulatedAnnealing(), Optim.Options(; iterations=10000)
+    )
+
+    # Extract the best candidate
+    best_candidate = Optim.minimizer(result)
+
+    best_candidate = round.(Int, best_candidate)  # Ensure integers
+
+    return best_candidate
+end
+
+function sfvct(
+    method::EvolutionX,
+    candidates::Matrix{Float64},
+    evaluated_points::Matrix{Float64},
+    centers::Matrix{Float64},
+    shape_parameter::Float64,
+    error_weights::Array,
+    methods::Methods,
+    space_filling_metric::Float64,
+)
+    # Define the objective function for Evolutionary.jl
+    function objective(candidate::Vector)
+        candidate = round.(Int, candidate)  # Ensure integer candidates
+
+        if sfcvtConstraints(candidate, evaluated_points, space_filling_metric) >= 0
+            return -Evaluation.evaluateSurrogate(
+                candidate, error_weights, shape_parameter, centers, methods
+            )
+        else
+            return Inf  # Penalize infeasible candidates
+        end
+    end
+
+    # Set bounds for the optimization variables
+    lower_bounds = fill(0, size(candidates, 1))  # Adjust bounds as necessary
+    upper_bounds = fill(maximum(candidates), size(candidates, 1))
+
+    # Optimize using Genetic Algorithm (GA)
+    result = Evolutionary.optimize(
+        objective, lower_bounds, upper_bounds, GA(; populationSize=100)
+    )
+
+    # Extract the best candidate (already an integer because of rounding)
+    best_candidate = result.minimizer
+
+    return best_candidate
+end
+
+function relativeLOOCVError(
+    methods::Methods,
+    starting_points::Points,
+    centers::Matrix,
+    shape_parameter::Float64,
+    constraints::Array,
+)
+    full_solutions = starting_points.solution
+
+    errors = zeros(Float64, size(starting_points.coordinates, 2))
+
+    for (idx, candidate::Vector) in enumerate(eachcol(starting_points.coordinates))
+
+        # remove the candidate from the starting_points
+        remaining_points = starting_points.coordinates[
+            :, setdiff(1:size(starting_points.coordinates, 2), idx)
+        ]
+
+        remaining_solutions = full_solutions[.!in.(1:length(full_solutions), Ref(idx))]
+
+        # recompute the basis function
+        basis = BasisFunction.basis(
+            methods.basis_function_method, shape_parameter, remaining_points, centers
+        )
+
+        # update weights
+        loocv_weights = lsqr(basis, remaining_solutions, constraints)
+
+        # compute the predicted value
+        predicted_value = Evaluation.evaluateSurrogate(
+            candidate, loocv_weights, shape_parameter, centers, methods
+        )
+
+        # the paper differs from there source code in this regard, and uses the norm instead.
+        #      errors[idx] = abs((full_solutions[idx] - predicted_value) / full_solutions[idx])
+        # this was adopted because it avoids division by zero.
+
+        errors[idx] = LinearAlgebra.norm((full_solutions[idx] - predicted_value))
+    end
+
+    return errors
+end
+
+function spaceFillingCriterion(
+    new_point::Vector{Float64}, existing_points::Matrix{Float64}
+)::Float64
+    distances = [
+        LinearAlgebra.norm(new_point .- point) for point in eachcol(existing_points)
+    ]
+
+    return minimum(distances)
+end
+
+function spaceFillingMetric(
+    candidates::Matrix{Float64}, existing_points::Matrix{Float64}
+)::Float64
+
+    # from Box 2 of Fuhg et al. 2021
+
+    d_max_min = maximum([
+        spaceFillingCriterion(candidate, existing_points) for
+        candidate::Vector in eachcol(candidates)
+    ])
+
+    return 0.5 * d_max_min
+end
+
+function sfcvtConstraints(
+    candidate::Union{Vector{Float64},Vector{Int64},Vector{JuMP.VariableRef}},
+    existing_points::Matrix{Float64},
+    space_filling_metric::Float64,
+)
+    # in SFCVT, according to Fuhg et al. 2021, the min of the norm must be greater than the Space Filling Metric
+    min_distance = minimum([
+        LinearAlgebra.norm(candidate .- existing_points[:, i]) for
+        i in 1:size(existing_points, 2)
+    ])
+
+    # if length(grad) > 0
+    #     # Compute the gradient of the constraint for the closest point
+    #     closest_point = existing_points[argmin([norm(x .- x_i) for x_i in existing_points])]
+    #     grad .= (x .- closest_point) / min_distance
+    # end
+
+    return min_distance - space_filling_metric
+end
+
+# ==============================================================================
+
+function adaptiveRefinement(method::MASA)
+    return nothing
 end
 
 # ==============================================================================

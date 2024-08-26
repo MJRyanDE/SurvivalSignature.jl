@@ -1,4 +1,7 @@
 module IntervalPredictorModel
+
+__precompile__()
+
 # ==============================================================================
 using Convex
 using SCS

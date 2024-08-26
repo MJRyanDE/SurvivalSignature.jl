@@ -12,12 +12,13 @@ using ..Structures: System, Simulation, Methods, Model
 
 using ..Structures: SimulationType, MonteCarloSimulation, IntervalPredictorSimulation
 using ..Structures: CentersMethod, GridCenters
+using ..Structures: AdaptiveRefinementMethod, SFCVT
 
 using ..SurvivalSignatureUtils
 
 # ==============================================================================
 
-export printDetails, plotError
+export printDetails, plotError, plotTime
 
 # ============================= TEXT ===========================================
 
@@ -45,11 +46,19 @@ function printDetails(sys::System, sim::Simulation, method::Methods)
 
         println("\tStarting Points: $(nameof(typeof(method.starting_points_method)))")
         println("\tCenter Points: $(nameof(typeof(method.centers_method)))")
-        if typeof(method.centers_method) == GridCenters()
-            println("\t\tCenters Interval: $(method.centers_method.confidence_interval)")
+        if typeof(method.centers_method) == GridCenters
+            println("\t\tCenters Interval: $(method.centers_method.centers_interval)")
         end
-
+        println(
+            "\tAdaptive Refinement: $(nameof(typeof(method.adaptive_refinement_method)))"
+        )
+        if typeof(method.adaptive_refinement_method) == SFCVT
+            println(
+                "\t\tOptimizer: $(nameof(typeof(method.adaptive_refinement_method.method)))"
+            )
+        end
         println("\tWeight Change: $(nameof(typeof(method.weight_change_method)))")
+        println("\t\tWeight Change Tolerance: $(sim.weight_change_tolerance)")
         println("==================================================")
         println("")
     end
@@ -142,7 +151,13 @@ function latexSpaces(str::String)
     return replace(str, " " => "\\ ")
 end
 
-# ============================ PLOTS ===========================================
+# ========================== ERROR PLOTS =======================================
+
+function count_repetitions(v::Vector{String})
+    occurrences = Dict{String,Int}()
+    result = [occurrences[element] = get(occurrences, element, 0) + 1 for element in v]
+    return result
+end
 
 function plotError(
     axis::Makie.Axis,
@@ -164,10 +179,23 @@ function plotError(
     looped_variable::Vector{<:Number};
     labels::Union{Vector{String},Nothing}=nothing,
 )
+    if !isnothing(labels)
+        repetitons = count_repetitions(labels)
+    end
+
     for (i, row::Vector) in enumerate(eachrow(error))
-        plotError(
-            axis, row, looped_variable; labels=isnothing(labels) ? nothing : labels[i]
-        )
+        if repetitons[i] > 1
+            plotError(
+                axis,
+                row,
+                looped_variable;
+                labels=isnothing(labels) ? nothing : "$(labels[i]) - $(repetitons[i])",
+            )
+        else
+            plotError(
+                axis, row, looped_variable; labels=isnothing(labels) ? nothing : labels[i]
+            )
+        end
     end
 end
 
@@ -216,6 +244,85 @@ function plotError(
 
     return plt
 end
-# ==============================================================================
 
+# ============================ TIMING PLOTS ====================================
+
+function plotTime(
+    axis::Makie.Axis,
+    time::Vector{Float64},
+    looped_variable::Vector{<:Number};
+    labels::Union{String,Nothing}=nothing,
+)
+    return CairoMakie.lines!(
+        axis,
+        looped_variable,
+        time;
+        label=isnothing(labels) ? nothing : LaTeXStrings.latexstring(labels),
+    )
+end
+
+function plotTime(
+    axis::Makie.Axis,
+    time::Matrix{Float64},
+    looped_variable::Vector{<:Number};
+    labels::Union{Vector{String},Nothing}=nothing,
+)
+    if !isnothing(labels)
+        repetitons = count_repetitions(labels)
+    end
+
+    for (i, row::Vector) in enumerate(eachrow(time))
+        if repetitons[i] > 1
+            plotTime(
+                axis,
+                row,
+                looped_variable;
+                labels=isnothing(labels) ? nothing : "$(labels[i]) - $(repetitons[i])",
+            )
+        else
+            plotTime(
+                axis, row, looped_variable; labels=isnothing(labels) ? nothing : labels[i]
+            )
+        end
+    end
+end
+
+function plotTime(
+    signatures::Union{Model,Array{Model}}, times::Array{Float64}; title::String="Times"
+)
+    sim_variable = looped_variable(getfield.(signatures, :sim)...)
+    method_variable = looped_variable(getfield.(signatures, :method)...)
+
+    plt = Figure(; fonts=(; regular="CMU Serif"))
+
+    ax = Axis(
+        plt[1, 1];
+        title=LaTeXStrings.latexstring(title),
+        xlabel=LaTeXStrings.latexstring(uppercase(string((sim_variable[1])))),
+        xgridstyle=:dash,
+        ygridstyle=:dash,
+        xtickalign=1,
+        xticksize=5,
+        ytickalign=1,
+        yticksize=5,
+        xscale=log10,
+        xminorticksvisible=true,
+        yminorticksvisible=true,
+    )
+
+    if typeof(method_variable) == Bool
+        plotTime(ax, times, sim_variable[2])
+    else
+        plotTime(
+            ax, times, sim_variable[2]; labels=string.(nameof.(typeof.(method_variable[2])))
+        )
+    end
+    if typeof(method_variable) == Bool
+    else
+        Legend(plt[1, 2], ax; unique=true, merge=true)
+    end
+
+    return plt
+end
+# ==============================================================================
 end

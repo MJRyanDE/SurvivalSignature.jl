@@ -1,5 +1,7 @@
 module Error
 
+__precompile__()
+
 # this module to store all functions relating to the different errors between 
 # true and estimated/appropriated Survival Signature values.
 
@@ -127,11 +129,23 @@ function calculateError(method::NORM, weights::Array{Float64}, old_weights::Arra
     return LinearAlgebra.norm(weights - old_weights)
 end
 
-function calculateError(method::NRMSE)
-    # to be filled out using the stopping critera from Mo et al.
-    return nothing
-end
+function calculateError(
+    method::NRMSE,
+    true_values::Vector{Float64},
+    predicted_values::Vector{Float64},
+    f_max::Float64,
+)
+    # Calculate f_max as the maximum value in true_values
+    f_max = max(f_max, maximum(true_values))
 
+    # Calculate the Root Mean Squared Error (RMSE)
+    rmse = sqrt(sum((true_values .- predicted_values) .^ 2) / length(true_values))
+
+    # Calculate the Normalized RMSE (NRMSE)
+    nrmse = rmse / f_max
+
+    return nrmse, f_max
+end
 # ==============================================================================
 
 end
