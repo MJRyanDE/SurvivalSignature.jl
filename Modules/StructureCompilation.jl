@@ -17,6 +17,77 @@ using ..Structures:
 export compileMethods, compileSimulation
 
 # ================================ METHODS =====================================
+
+function compileMethods(
+    sim_methods::Union{SimulationType,Vector{<:SimulationType}},
+    starting_points_methods::Union{StartingMethod,Vector{<:StartingMethod}},
+    centers_methods::Union{CentersMethod,Vector{<:CentersMethod}},
+    weight_change_methods::Union{ErrorType,Vector{<:ErrorType}},
+    shape_parameter_methods::Union{ShapeParameterMethod,Vector{<:ShapeParameterMethod}},
+    basis_function_methods::Union{BasisFunctionMethod,Vector{<:BasisFunctionMethod}},
+    adaptive_refinement_methods::Union{
+        AdaptiveRefinementMethod,Vector{<:AdaptiveRefinementMethod}
+    },
+)
+
+    # Ensure all inputs are vectors for uniform processing
+    sim_methods = isa(sim_methods, Vector) ? sim_methods : [sim_methods]
+    starting_points_methods = if isa(starting_points_methods, Vector)
+        starting_points_methods
+    else
+        [starting_points_methods]
+    end
+    centers_methods = isa(centers_methods, Vector) ? centers_methods : [centers_methods]
+    weight_change_methods =
+        isa(weight_change_methods, Vector) ? weight_change_methods : [weight_change_methods]
+    shape_parameter_methods = if isa(shape_parameter_methods, Vector)
+        shape_parameter_methods
+    else
+        [shape_parameter_methods]
+    end
+    basis_function_methods = if isa(basis_function_methods, Vector)
+        basis_function_methods
+    else
+        [basis_function_methods]
+    end
+    adaptive_refinement_methods = if isa(adaptive_refinement_methods, Vector)
+        adaptive_refinement_methods
+    else
+        [adaptive_refinement_methods]
+    end
+
+    methods = Vector{Methods}()
+
+    for sim_method in sim_methods
+        for starting_points_method in starting_points_methods
+            for centers_method in centers_methods
+                for weight_change_method in weight_change_methods
+                    for shape_parameter_method in shape_parameter_methods
+                        for basis_function_method in basis_function_methods
+                            for adaptive_refinement_method in adaptive_refinement_methods
+                                push!(
+                                    methods,
+                                    Structures.Methods(
+                                        sim_method,
+                                        starting_points_method,
+                                        centers_method,
+                                        weight_change_method,
+                                        shape_parameter_method,
+                                        basis_function_method,
+                                        adaptive_refinement_method,
+                                    ),
+                                )
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return methods
+end
+
 function compileMethods(
     sim_method::SimulationType,
     starting_points_method::StartingMethod,

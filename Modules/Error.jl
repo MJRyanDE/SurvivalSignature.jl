@@ -124,6 +124,18 @@ function calculateError(
            absoluteSum(true_values, Statistics.mean(true_values))
 end
 
+# function calculateError(
+#     method::SMAPE, true_values::Array{Float64}, predicted_values::Array{Float64}
+# )
+#     epsilon = eps()  # A small value to avoid division by zero
+#     return sum(
+#         2 .* abs.(true_values .- predicted_values) ./
+#         (abs.(true_values) .+ abs.(predicted_values) .+ epsilon),
+#     ) * 100 / prod(size(true_values))
+# end
+
+# ============================ WEIGHT CHANGE ===================================
+
 function calculateError(method::NORM, weights::Array{Float64}, old_weights::Array{Float64})
     # _norm to avoid overlap with third-party functions
     return LinearAlgebra.norm(weights - old_weights)

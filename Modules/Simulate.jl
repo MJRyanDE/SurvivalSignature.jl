@@ -6,6 +6,7 @@ __precompile__()
 # ==============================================================================
 
 using Plots
+using LaTeXStrings
 
 using ..SurvivalSignatureUtils
 using ..Structures: System, Simulation, Methods, Points, Model
@@ -35,6 +36,7 @@ function simulate(
     sys::System,
     sims::Vector{Simulation};
     verbose::Bool=false,
+    save::Bool=false,
     timing::Bool=false,
     plot_sample_space::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -51,6 +53,7 @@ function simulate(
                 sim,
                 method;
                 verbose=verbose,
+                save=save,
                 timing=timing,
                 plot_sample_space=plot_sample_space,
                 shape_parameter=shape_parameter,
@@ -66,6 +69,7 @@ function simulate(
     sys::System,
     sim::Simulation;
     verbose::Bool=false,
+    save::Bool=false,
     plot_sample_space::Bool=false,
     timing::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -85,6 +89,7 @@ function simulate(
             sim,
             method;
             verbose=verbose,
+            save=save,
             timing=timing,
             plot_sample_space=plot_sample_space,
             shape_parameter=shape_parameter,
@@ -99,6 +104,7 @@ function simulate(
     sys::System,
     sims::Vector{Simulation};
     verbose::Bool=false,
+    save::Bool=false,
     timing::Bool=false,
     plot_sample_space::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -115,6 +121,7 @@ function simulate(
             sim,
             method;
             verbose=verbose,
+            save=save,
             timing=timing,
             plot_sample_space=plot_sample_space,
             shape_parameter=shape_parameter,
@@ -129,6 +136,7 @@ function simulate(
     sys::System,
     sim::Simulation;
     verbose::Bool=false,
+    save::Bool=false,
     timing::Bool=false,
     plot_sample_space::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -139,6 +147,7 @@ function simulate(
         sim,
         method;
         verbose=verbose,
+        save=save,
         timing=timing,
         plot_sample_space=plot_sample_space,
         shape_parameter=shape_parameter,
@@ -151,6 +160,7 @@ function simulate(
     sim::Simulation,
     methods::Methods;
     verbose::Bool=false,
+    save::Bool=false,
     timing::Bool=false,
     plot_sample_space::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -178,7 +188,7 @@ function simulate(
         println("Calculating Survival Signature Entires...")
     end
     Phi.solution, Phi.confidence = Evaluation.computeSurvivalSignatureEntry(
-        sys, sim, Phi.coordinates
+        sys, sim, Phi.coordinates; verbose=verbose
     )
     if verbose
         println("Survival Signature Calculated\n")
@@ -200,14 +210,8 @@ function simulate(
     # Timing
     if timing
         elapsed_time = (time_ns() - start_time) / 1e9       # in seconds
-        metrics = Metrics(Times(elapsed_time, 0.0, 0.0, 0.0, 0.0), 0)
+        metrics = Metrics(Times(elapsed_time, 0.0, 0.0, 0.0, 0.0, 0.0), 0)
         signature.metrics = metrics
-
-        if verbose
-            println("\tTime Elapsed: $(elapsed_time)s")
-            println(" ")
-            println("Finished Successfully.\n")
-        end
     end
 
     return signature
@@ -218,6 +222,7 @@ function simulate(
     sim::Simulation,
     methods::Methods;
     verbose::Bool=false,
+    save::Bool=false,
     timing::Bool=false,
     plot_sample_space::Bool=false,
     shape_parameter::Union{Nothing,Float64}=nothing,
@@ -253,6 +258,7 @@ function simulate(
     starting_points.solution, starting_points.confidence = Evaluation.computeSurvivalSignatureEntry(
         sys, sim, starting_points.coordinates; verbose=verbose
     )
+
     if verbose
         println("Starting Points Generated.\n")
     end
@@ -266,9 +272,10 @@ function simulate(
         println("Generating Centers...")
     end
     centers = Centers.generateCenters(
-        methods.centers_method, state_vectors, sim.threshold; verbose=verbose
+        methods.centers_method, sys, sim, state_vectors, sim.threshold; verbose=verbose
     )
     if verbose
+        println("\tNumber of Centers: $(size(centers, 2))")
         println("Centers Generated.\n")
     end
     if timing
@@ -278,16 +285,31 @@ function simulate(
     # =================PLOT CENTERS AND STARTING POINTS=========================
 
     if plot_sample_space
-        plotSampleSpace(
+        plt = plotSampleSpace(
+            state_vectors,
             Phi;
             centers=centers,
-            methods=methods,
-            initial_points=starting_points.coordinates,
-            show_points=true,
+            initial_points=nothing,
             combine_initial_additional=false,
         )
-    end
+        if save
+            clean_method = replace(string(methods.centers_method), r"[\[\]\(\), ]" => "_")
 
+            # Construct the filename based on the percolation flag and cleaned centers_method
+            if sys.percolation
+                title = "centers_plot_$(clean_method)_percolation.pdf"
+            else
+                title = "centers_plot_$(clean_method).pdf"
+            end
+
+            # Define the path to save the figure
+            file_path = joinpath("figures", "centers", title)
+
+            # Save the plot
+            savefig(plt, file_path)
+        end
+        display(plt)
+    end
     # ==========================================================================
 
     # ============================== CONSTRAINTS ===============================
@@ -304,7 +326,11 @@ function simulate(
     end
     if isnothing(shape_parameter)
         shape_parameter = ShapeParameter.computeShapeParameter(
-            methods.shape_parameter_method, Phi.coordinates, starting_points, centers
+            methods.shape_parameter_method,
+            Phi.coordinates,
+            starting_points,
+            centers;
+            verbose=verbose,
         )
     else
         shape_parameter = shape_parameter
@@ -346,7 +372,7 @@ function simulate(
         println("Beginning Adaptive Refinement...")
     end
 
-    evaluated_points, weights, upper_bound, lower_bound, iterations = AdaptiveRefinement.adaptiveRefinement(
+    evaluated_points, weights, upper_bound, lower_bound, iterations, shape_parameter = AdaptiveRefinement.adaptiveRefinement(
         methods.adaptive_refinement_method,
         Phi,
         starting_points,
@@ -382,15 +408,15 @@ function simulate(
             end
         end
 
-        plotSampleSpace(
+        plt = plotSampleSpace(
+            state_vectors,
             Phi;
             centers=centers,
-            methods=methods,
             initial_points=starting_points.coordinates,
             additional_points=additional_points,
-            show_points=true,
-            combine_initial_additional=false,
+            combine_initial_additional=true,
         )
+        display(plt)
     end
 
     # ========================== INTERVAL PREDICTOR ============================
@@ -417,26 +443,34 @@ function simulate(
     if verbose
         println("Evaluating Remaining Points...")
     end
+
+    if timing
+        evaluation_start_time = time_ns()
+    end
+
     signature = Evaluation.evaluate(signature)
+
+    if timing
+        evaluation_time = (time_ns() - evaluation_start_time) / 1e9
+    end
+
     if verbose
         println("Remaining Points Evaluated.\n")
     end
+
     # ==========================================================================
 
     # Timing
     if timing
         total_time = (time_ns() - start_time) / 1e9       # in seconds
-        times = Times(total_time, centers_time, shape_param_time, adaptive_refinement_time)
+        times = Times(
+            total_time,
+            centers_time,
+            shape_param_time,
+            adaptive_refinement_time,
+            evaluation_time,
+        )
         signature.metrics = Metrics(times, iterations)
-
-        if verbose
-            println("Total Time Elapsed: $(total_time)s")
-            println("Centers Generation Time: $(centers_time)s")
-            println("Shape Parameter Time: $(shape_param_time)s")
-            println("Adaptive Refinement Time: $(adaptive_refinement_time)s")
-            println(" ")
-            println("Finished Successfully.\n")
-        end
     end
 
     return signature
@@ -510,112 +544,151 @@ end
 # ==============================================================================
 
 # relocate this function.
-function plotSampleSpace(
-    Phi::Points;
-    centers::Union{Nothing,Matrix{Float64}}=nothing,
-    methods::Union{Nothing,Methods}=nothing,
-    initial_points::Union{Nothing,Array{Float64}}=nothing,
-    additional_points::Union{Nothing,Array{Float64}}=nothing,
-    show_points::Bool=true,
-    combine_initial_additional::Bool=false,
+
+default(;
+    framestyle=:box,
+    label=nothing,
+    grid=true,
+    legend=:bottomleft,
+    legend_font_halign=:left,
+    size=(300, 300),
+    titlefontsize=8,
+    guidefontsize=8,
+    legendfontsize=7,
+    tickfontsize=8,
+    left_margin=-2 * Plots.mm,
+    bottom_margin=-2 * Plots.mm,
+    fontfamily="Computer Modern",
+    dpi=600,
 )
 
-    # currently only works for 2D - two types.
+function plotSampleSpace(
+    state_vectors::Array{Float64},
+    Phi::Points;
+    centers::Union{Nothing,Matrix{Float64}}=nothing,
+    initial_points::Union{Nothing,Array{Float64}}=nothing,
+    additional_points::Union{Nothing,Array{Float64}}=nothing,
+    combine_initial_additional::Bool=false,
+)
+    marker_size = 1.75 * sqrt(2601) / sqrt(size(state_vectors, 2))
 
-    x_phi = Phi.coordinates[1, :]  # x-coordinates for Phi
-    y_phi = Phi.coordinates[2, :]  # y-coordinates for Phi
+    # Extract coordinates
+    x_state = state_vectors[1, :]
+    y_state = state_vectors[2, :]
+    x_phi = Phi.coordinates[1, :]
+    y_phi = Phi.coordinates[2, :]
 
-    if !isnothing(centers)
-        x_centers = centers[1, :]  # x-coordinates for centers
-        y_centers = centers[2, :]  # y-coordinates for centers
+    # Determine which points are percolated and which are not
+    percolated_x = []
+    percolated_y = []
+    non_percolated_x = []
+    non_percolated_y = []
+
+    for i in eachindex(x_state)
+        if (x_state[i], y_state[i]) in zip(x_phi, y_phi)
+            push!(non_percolated_x, x_state[i])
+            push!(non_percolated_y, y_state[i])
+        else
+            push!(percolated_x, x_state[i])
+            push!(percolated_y, y_state[i])
+        end
     end
 
-    if !isnothing(initial_points)
-        x_initial = initial_points[1, :]  # x-coordinates for initial points
-        y_initial = initial_points[2, :]  # y-coordinates for initial points
-    end
+    legend_labels = String[]  # To keep track of the labels
 
-    if !isnothing(additional_points)
-        x_evaluated = additional_points[1, :]  # x-coordinates for additional points
-        y_evaluated = additional_points[2, :]  # y-coordinates for additional points
-    end
+    Plots.plot(
+        non_percolated_x,
+        non_percolated_y;
+        seriestype=:scatter,
+        markersize=marker_size,
+        color="#cfe2f3",
+        markerstrokecolor="#cfe2f3",
+        label=nothing,
+        xlabel=L"l_1",
+        ylabel=L"l_2",
+    )
 
-    # Plot Phi coordinates without a label (no legend entry)
-    if show_points
-        Plots.plot(
-            x_phi,
-            y_phi;
-            seriestype=:scatter,
-            marker=:+,
-            markersize=0.5,
-            color="black",
-            label=false,
-        )
-    end
-
-    # Plot centers with the label "Center"
-    if !isnothing(centers)
+    # Plot percolated points
+    if !isempty(percolated_x)
         Plots.plot!(
+            percolated_x,
+            percolated_y;
+            seriestype=:scatter,
+            markersize=marker_size,
+            color="#edc951",
+            markerstrokecolor="#edc951",
+            label="Percolated",
+        )
+        push!(legend_labels, "Percolated")
+    end
+    # Plot centers if provided
+    if !isnothing(centers)
+        x_centers = centers[1, :]
+        y_centers = centers[2, :]
+        plt = Plots.plot!(
             x_centers,
             y_centers;
             seriestype=:scatter,
-            markersize=3,
-            color="red",
+            markersize=marker_size,
+            color=:tomato,
+            markerstrokecolor=:tomato,
             label="Center",
         )
+        push!(legend_labels, "Center")
     end
 
-    if combine_initial_additional
-        label_initial = "Evaluated"
-        color_initial = "blue"
-
-        label_additional = "Evaluated"
-        color_additional = "blue"
-    else
+    # Plot initial and additional points based on options
+    if !combine_initial_additional
         label_initial = "Initial"
-        color_initial = "blue"
+        color_initial = "#7DCE82"
 
         label_additional = "Additional"
-        color_additional = "yellow"
+        color_additional = :dodgerblue
+    else
+        label_initial = "Evaluated"
+        color_initial = :dodgerblue
+
+        label_additional = ""
+        color_additional = :dodgerblue
     end
 
-    # Plot initial points with the label "Initial"
+    # Plot initial points
     if !isnothing(initial_points)
         Plots.plot!(
-            x_initial,
-            y_initial;
+            initial_points[1, :],
+            initial_points[2, :];
             seriestype=:scatter,
-            markersize=3,
+            markersize=marker_size,
             color=color_initial,
+            markerstrokecolor=color_initial,
             label=label_initial,
         )
+        push!(legend_labels, label_initial)
     end
 
-    # Plot additional points with the label "Evaluated"
+    # Plot additional points
     if !isnothing(additional_points)
         Plots.plot!(
-            x_evaluated,
-            y_evaluated;
+            additional_points[1, :],
+            additional_points[2, :];
             seriestype=:scatter,
-            markersize=3,
+            markersize=marker_size,
             color=color_additional,
+            markerstrokecolor=color_additional,
             label=label_additional,
         )
+        push!(legend_labels, label_additional)
     end
 
-    # Add title and display
-    if !isnothing(methods)
-        if !isnothing(additional_points)
-            Plots.plot!(;
-                title="Sample Space - $(nameof(typeof(methods.centers_method))) - $(nameof(typeof(methods.adaptive_refinement_method)))",
-            )
-        else
-            Plots.plot!(; title="Sample Space - $(nameof(typeof(methods.centers_method)))")
-        end
+    # Determine legend visibility based on the number of unique labels
+    if length(legend_labels) < 2
+        Plots.plot!(; legend=false)
     else
-        Plots.plot!(; title="Sample Space")
+        Plots.plot!(; legend=:bottomleft)
     end
+    # Display the plot
+    plt = Plots.plot!()
 
-    return display(Plots.plot!())
+    return plt
 end
 end

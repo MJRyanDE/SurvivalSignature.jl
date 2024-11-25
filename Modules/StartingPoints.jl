@@ -20,14 +20,16 @@ export generateStartingPoints
 
 # ============================== METHODS =======================================
 
-function generateStartingPoints(method::GridStart, state_vectors::Matrix, types::Dict)
+function generateStartingPoints(
+    method::GridStart, state_vectors::Matrix, types::Dict
+)::Points
     # grid startng points
     lb = minimum(state_vectors; dims=2)
     ub = maximum(state_vectors; dims=2)
 
     tree = NearestNeighbors.KDTree(state_vectors)
 
-    ranges = [range(0.0, 1.0; length=l) for l in fill(5, length(types))]
+    ranges = [range(0.0, 1.0; length=l) for l in fill(method.num_points, length(types))]
 
     starting_points = mapreduce(t -> [t...], hcat, IterTools.Iterators.product(ranges...))
 

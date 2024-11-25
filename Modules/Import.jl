@@ -7,11 +7,11 @@ export SurvivalSignatureUtils,
     Visualization,
     Error,
     Systems,
+    Evaluation,
     BasisFunction,
     ShapeParameter,
     StartingPoints,
     Centers,
-    Evaluation,
     IntervalPredictorModel,
     AdaptiveRefinement,
     Simulate,
@@ -39,6 +39,9 @@ using .Error
 include("Systems.jl")
 using .Systems
 
+include("Evaluation.jl")
+using .Evaluation
+
 include("ShapeParameter.jl")
 using .ShapeParameter
 
@@ -47,9 +50,6 @@ using .StartingPoints
 
 include("Centers.jl")
 using .Centers
-
-include("Evaluation.jl")
-using .Evaluation
 
 include("IntervalPredictorModel.jl")
 using .IntervalPredictorModel

@@ -12,12 +12,12 @@ export System, Simulation, Methods
 export SimulationModel, MonteCarloModel, PredictorModel, Model
 export SimulationType, MonteCarloSimulation, IntervalPredictorSimulation
 
-export BasisFunctionMethod, Gaussian
-export ShapeParameterMethod, Hardy, Rippa, DirectAMLS, IndirectAMLS
-export CentersMethod, GridCenters, Greedy, GeometricGreedy, Leja
+export BasisFunctionMethod, Gaussian, LaguerreGaussian
+export ShapeParameterMethod, Hardy, Rippa, DirectAMLS, IterativeAMLS
+export CentersMethod, Grid, SparseGrid, Greedy, GeometricGreedy, Leja, Leja2
 export StartingMethod, GridStart
 export SystemMethod, GridSystem
-export AdaptiveRefinementMethod, TEAD, MEP, LOLA, MIPT, SFCVT, MASA, EI
+export AdaptiveRefinementMethod, None, TEAD, MEP, LOLA, MIPT, OIPT, SFCVT, MASA, EI, EIGF
 export SFCVT_Method, EnumerationX, BlackBoxX, OptimX, SimulatedAnnealingX, EvolutionX
 export Metrics, Times
 
@@ -70,6 +70,13 @@ end
 abstract type BasisFunctionMethod end
 
 struct Gaussian <: BasisFunctionMethod end
+struct LaguerreGaussian <: BasisFunctionMethod
+    order::Int
+
+    function LaguerreGaussian(order::Int=2)
+        return new(order)
+    end
+end
 
 # ============================== SIMULATIONS ===================================
 
@@ -83,26 +90,31 @@ struct IntervalPredictorSimulation <: SimulationType end
 abstract type ShapeParameterMethod end
 struct Hardy <: ShapeParameterMethod end
 struct Rippa <: ShapeParameterMethod end
-
 struct DirectAMLS <: ShapeParameterMethod
     max_iterations::Int
     tolerance::Float64
+    order::Integer
 
     function DirectAMLS(
-        max_iterations::Union{Nothing,Int}=1000, tolerance::Union{Nothing,Float64}=1e-6
+        max_iterations::Union{Nothing,Int}=2000,
+        tolerance::Union{Nothing,Float64}=1e-5,
+        order::Int=2,
     )
-        return new(max_iterations, tolerance)
+        return new(max_iterations, tolerance, order::Int)
     end
 end
 
-struct IndirectAMLS <: ShapeParameterMethod
+struct IterativeAMLS <: ShapeParameterMethod
     max_iterations::Int
     tolerance::Float64
+    order::Int
 
-    function IndirectAMLS(
-        max_iterations::Union{Nothing,Int}=1000, tolerance::Union{Nothing,Float64}=1e-5
+    function IterativeAMLS(
+        max_iterations::Union{Nothing,Int}=2000,
+        tolerance::Union{Nothing,Float64}=1e-5,
+        order::Int=2,
     )
-        return new(max_iterations, tolerance)
+        return new(max_iterations, tolerance, order::Int)
     end
 end
 
@@ -121,15 +133,26 @@ end
 
 abstract type AdaptiveRefinementMethod end
 
-struct TEAD <: AdaptiveRefinementMethod end
-struct MIPT <: AdaptiveRefinementMethod
+struct None <: AdaptiveRefinementMethod end
+
+struct TEAD <: AdaptiveRefinementMethod
+    adaptive_refinement_shape_parameter::Bool
+    max_iterations::Int
+
+    function TEAD(
+        adaptive_refinement_shape_parameter::Bool=false, max_iterations::Int=100000
+    )
+        return new(adaptive_refinement_shape_parameter, max_iterations)
+    end
+end
+struct OIPT <: AdaptiveRefinementMethod
     alpha::Float64
     beta::Float64
     num_initial_points::Int
     num_additional_points::Int
 
     # default values based on Combecq et al. 2011
-    function MIPT(
+    function OIPT(
         alpha::Float64=0.5,
         beta::Float64=0.3,
         num_initial_points::Int=150,
@@ -139,9 +162,40 @@ struct MIPT <: AdaptiveRefinementMethod
     end
 end
 
-struct MEPE <: AdaptiveRefinementMethod end
+struct MIPT <: AdaptiveRefinementMethod
+    alpha::Float64
+    threshold::Float64
+    maximum_points::Int
+
+    # default values based on Combecq et al. 2011
+    function MIPT(alpha::Float64=0.5, threshold::Float64=10e-4, maximum_points::Int=100)
+        return new(alpha, threshold, maximum_points)
+    end
+end
+
+struct MEPE <: AdaptiveRefinementMethod
+    max_iterations::Int
+
+    function MEPE(max_iterations::Int=100)
+        return new(max_iterations)
+    end
+end
 struct LOLA <: AdaptiveRefinementMethod end
-struct EI <: AdaptiveRefinementMethod end
+struct EI <: AdaptiveRefinementMethod
+    max_iterations::Int
+
+    function EI(max_iterations::Int=100)
+        return new(max_iterations)
+    end
+end
+
+struct EIGF <: AdaptiveRefinementMethod
+    max_iterations::Int
+
+    function EIGF(max_iterations::Int=100)
+        return new(max_iterations)
+    end
+end
 
 abstract type SFCVT_Method end
 struct BlackBoxX <: SFCVT_Method end
@@ -152,9 +206,12 @@ struct EvolutionX <: SFCVT_Method end
 
 struct SFCVT <: AdaptiveRefinementMethod
     method::SFCVT_Method
+    max_iterations::Int
 
-    function SFCVT(method::Union{SFCVT_Method,Nothing}=EnumerationX())
-        return new(method)
+    function SFCVT(
+        method::Union{SFCVT_Method,Nothing}=EnumerationX(), max_iterations::Int=100
+    )
+        return new(method, max_iterations)
     end
 end
 
@@ -164,35 +221,49 @@ struct MASA <: AdaptiveRefinementMethod end
 
 abstract type CentersMethod end
 
-struct GridCenters <: CentersMethod
+struct Grid <: CentersMethod
     centers_interval::Vector{Int}       # number of centers in each dimension
+    percolation::Bool
 
-    function GridCenters(centers_interval::Vector{Int}=[15, 15])
-        return new(centers_interval)
+    function Grid(centers_interval::Vector{Int}=[15, 15], percolation::Bool=true)
+        return new(centers_interval, percolation)
+    end
+end
+
+struct SparseGrid <: CentersMethod
+    centers_interval::Vector{Int}       # number of centers in each dimension
+    percolation::Bool
+
+    function SparseGrid(centers_interval::Vector{Int}=[15, 15], percolation::Bool=true)
+        return new(centers_interval, percolation)
     end
 end
 
 struct Greedy <: CentersMethod
     nCenters::Int
+    percolation::Bool
 
-    function Greedy(nCenters::Int=225)
-        return new(nCenters)
+    function Greedy(nCenters::Int=225, percolation::Bool=true)
+        return new(nCenters, percolation)
     end
 end
 
 struct GeometricGreedy <: CentersMethod
     nCenters::Int
+    percolation::Bool
 
-    function GeometricGreedy(nCenters::Int=225)
-        return new(nCenters)
+    function GeometricGreedy(nCenters::Int=225, percolation::Bool=true)
+        return new(nCenters, percolation)
     end
 end
 
 struct Leja <: CentersMethod
     nCenters::Int
+    scale::Float64
+    percolation::Bool
 
-    function Leja(nCenters::Int=225)
-        return new(nCenters)
+    function Leja(nCenters::Int=225, scale::Float64=3.0, percolation::Bool=true)
+        return new(nCenters, scale, percolation)
     end
 end
 
@@ -209,7 +280,13 @@ struct NRMSE <: ErrorType end
 
 abstract type StartingMethod end
 
-struct GridStart <: StartingMethod end
+struct GridStart <: StartingMethod
+    num_points::Int # number of starting points in each dim.
+
+    function GridStart(num_points::Int=5)
+        return new(num_points)
+    end
+end
 
 # ==============================================================================
 
@@ -229,14 +306,16 @@ struct Times
     centers::Float64
     shape_parameter::Float64
     adaptive_refinement::Float64
+    evaluation::Float64
 
     function Times(
         total::Float64=0.0,
         centers::Float64=0.0,
         shape_parameter::Float64=0.0,
         adaptive_refinement::Float64=0.0,
+        evaluation::Float64=0.0,
     )
-        return new(total, centers, shape_parameter, adaptive_refinement)
+        return new(total, centers, shape_parameter, adaptive_refinement, evaluation)
     end
 end
 

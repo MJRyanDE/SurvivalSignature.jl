@@ -1,5 +1,7 @@
 module SurvivalSignatureUtils
 
+using Statistics
+
 __precompile__()
 
 function ensure_column_array!(arr::Array)
@@ -152,6 +154,42 @@ function print_structure(structure)
     end
 end
 
+function average_dictionaries(
+    arrays::Union{
+        Vector{Vector{Dict{String,Float64}}},
+        Vector{Matrix{Dict{String,Float64}}},
+        Vector{VecOrMat{Dict{String,Float64}}},
+    },
+)
+
+    # extract the keys from the first dictionary
+    key_names = collect(keys(arrays[1][1]))
+
+    # iterate over the dictionaries
+    result_array = [zeros(Float64, size(arrays[1])) for _ in 1:length(key_names)]
+
+    for array in arrays
+        for (i, key) in enumerate(key_names)
+            result_array[i] .+= [dict[key] for dict in array]
+        end
+    end
+
+    result_array = result_array ./ length(arrays)
+
+    # Initialize the result as a matrix of dictionaries with the same shape as inner arrays
+    result = [Dict{String,Float64}() for _ in result_array[1]]
+
+    # Populate the result array with dictionaries
+    for idx in eachindex(result_array[1])  # Iterate over each index in the first inner array
+        for (j, array) in enumerate(result_array)  # Iterate over each inner array
+            result[idx][key_names[j]] = array[idx]  # Create a dictionary entry for each key
+        end
+    end
+
+    return result
+end
+
+# Example
 # ================================ MACROS ======================================
 
 export @examine

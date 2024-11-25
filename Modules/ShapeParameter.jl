@@ -13,16 +13,18 @@ using Distances
 using IterTools
 using Plots
 using Surrogates
+using Convex # needed for Variable and evaluate
+using SCS # needed for Optimizer
 
 using Optim
 
 # ==============================================================================
 
 using ..Structures: System
-using ..Structures: Points
-using ..Structures: Hardy, Rippa, DirectAMLS, IndirectAMLS
+using ..Structures: Points, Methods
+using ..Structures: Hardy, Rippa, DirectAMLS, IterativeAMLS
 
-using ..Structures: Gaussian
+using ..Structures: Gaussian, LaguerreGaussian
 
 using ..SurvivalSignatureUtils
 
@@ -35,7 +37,11 @@ export computeShapeParameter
 # ============================= METHODS ========================================
 
 function computeShapeParameter(
-    method::Hardy, points::Array, starting_points::Points, centers::Array
+    method::Hardy,
+    points::Array,
+    starting_points::Points,
+    centers::Array;
+    verbose::Bool=false,
 )::Float64
 
     # knn(k=2) returns the 2 closest points, since the 1. is itself 
@@ -56,10 +62,12 @@ function computeShapeParameter(method::Hardy, points::Array)::Float64
     return 1 / (0.815 * (d / size(points, 2)))
 end
 
-# 
-
 function computeShapeParameter(
-    method::Rippa, points::Array, starting_points::Points, centers::Array
+    method::Rippa,
+    points::Array,
+    starting_points::Points,
+    centers::Array;
+    verbose::Bool=false,
 )
     distance_matrix = survialSignatureDistanceMatrix(starting_points.coordinates)
     distance_matrix = distance_matrix ./ maximum(distance_matrix) # normalize
@@ -77,11 +85,16 @@ function computeShapeParameter(
         end
     result = Optim.optimize(cost_function, 0.0, 10.0; method=Optim.Brent())
     ϵ_opt = Optim.minimizer(result)
+
     return ϵ_opt
 end
 
 function computeShapeParameter(
-    method::DirectAMLS, points::Array, starting_points::Points, centers::Array
+    method::DirectAMLS,
+    points::Array,
+    starting_points::Points,
+    centers::Array;
+    verbose::Bool=false,
 )::Float64
     distance_matrix = survialSignatureDistanceMatrix(starting_points.coordinates)
     distance_matrix = distance_matrix ./ maximum(distance_matrix) # normalize
@@ -89,10 +102,13 @@ function computeShapeParameter(
         ϵ -> begin
             cost = directAMLS(
                 distance_matrix,
+                starting_points.coordinates,
+                method.order,
                 starting_points.solution,
                 ϵ,
                 method.max_iterations,
-                method.tolerance,
+                method.tolerance;
+                verbose=verbose,
             )
             return cost
         end
@@ -102,18 +118,25 @@ function computeShapeParameter(
 end
 
 function computeShapeParameter(
-    method::IndirectAMLS, points::Array, starting_points::Points, centers::Array
+    method::IterativeAMLS,
+    points::Array,
+    starting_points::Points,
+    centers::Array;
+    verbose::Bool=false,
 )::Float64
     distance_matrix = survialSignatureDistanceMatrix(starting_points.coordinates)
     distance_matrix = distance_matrix ./ maximum(distance_matrix) # normalize
     cost_function =
         ϵ -> begin
-            cost = optimized_indirectAMLS(
+            cost = optimized_iterativeAMLS(
                 distance_matrix,
+                starting_points.coordinates,
+                method.order,
                 starting_points.solution,
                 ϵ,
                 method.max_iterations,
-                method.tolerance,
+                method.tolerance;
+                verbose,
             )
             return cost
         end
@@ -224,22 +247,28 @@ end
 
 function directAMLS(
     distance_matrix::Matrix{Float64},
+    coordinates::Union{Matrix,Vector},
+    order::Int,
     solutions::Vector{Float64},
     shape_parameter::Float64,
     max_iterations::Int,
-    tolerance::Float64,
+    tolerance::Float64;
+    verbose::Bool=false,
 )::Float64
     # the Direct AMLS method necessitates A be a square matrix, however this is 
     # only the case if the number of centers matches the number of starting points.
 
-    A = BasisFunction.basis(Gaussian(), shape_parameter, distance_matrix)
+    A = BasisFunction.basis(
+        LaguerreGaussian(order), coordinates, shape_parameter, distance_matrix
+    )
     I = Matrix(LinearAlgebra.I(size(A, 1)))
 
     v_prev = solutions # initializing
     M_prev = I
     cost_prev = Inf
     cost = 0.0
-    for i in 1:max_iterations
+    min_change = Inf
+    for iter in 1:max_iterations
         v = (I - A) * v_prev .+ solutions
 
         # eigen dicomposition 
@@ -253,14 +282,33 @@ function directAMLS(
         e = v ./ diag(X * M * X')
 
         cost = LinearAlgebra.norm(e)
+
+        change = abs(cost - cost_prev)
+
+        if change < min_change
+            min_change = change
+        end
+
+        if change < tolerance
+            if verbose
+                println("\tConverged after $iter iterations")
+            end
+            return cost
+        end
+
         # convergence
-        if abs(cost - cost_prev) < tolerance
+        if change < tolerance
             return cost
         end
 
         cost_prev = cost
         M_prev = M
         v_prev = v
+    end
+
+    if verbose
+        println("\tMin. Change: $min_change - Tolerance: $tolerance")
+        println("\tWarning: Indirect AMLS did not converge within max_iterations")
     end
 
     return cost
@@ -281,17 +329,22 @@ function isSquare(matrix::Matrix)::Bool
 end
 
 # ==============================================================================
-function optimized_indirectAMLS(
+function optimized_iterativeAMLS(
     distance_matrix::Matrix{Float64},
+    coordinates::Union{Matrix,Vector},
+    order::Int,
     solutions::Vector{Float64},
     shape_parameter::Float64,
     max_iterations::Int,
-    tolerance::Float64,
+    tolerance::Float64;
+    verbose::Bool=false,
 )::Float64
     N = length(solutions)
 
     # Step 1: Construct matrix A using RBFs
-    A = BasisFunction.basis(Gaussian(), shape_parameter, distance_matrix)
+    A = BasisFunction.basis(
+        LaguerreGaussian(order), coordinates, shape_parameter, distance_matrix
+    )
 
     # Step 2: Perform eigen-decomposition of A
     Λ_values, X = eigen(A)  # Get eigenvalues (Λ_values) and eigenvectors (X)
@@ -306,11 +359,12 @@ function optimized_indirectAMLS(
     e_prev = diag(D_prev)
     cost_prev = norm(e_prev)  # Initial cost based on the norm of e^{(0)}
 
+    min_change = Inf
     for iter in 1:max_iterations
 
         # Perform iterative update
-        S = (I - Λ) * S + Λ * (pinv(X) * D_prev)
-
+        S = (I - Λ) * S + Λ * (inv(X) * D_prev)
+        S = clamp.(S, -1e12, 1e12)
         # Compute D_new as a diagonal matrix
         D_new = Diagonal(diag(X * S))
 
@@ -320,12 +374,16 @@ function optimized_indirectAMLS(
         # Compute cost based on the norm of e_new
         cost = norm(e_new)
 
-        # Check convergence
-        if abs(cost - cost_prev) < tolerance
-            println("Convergence achieved at iteration $iter with cost = $cost")
-            println("\tcost_prev: $cost_prev")
-            println("\ttolerance: $tolerance")
-            println("\t\tcost difference: $(abs(cost - cost_prev))")
+        change = abs(cost - cost_prev)
+
+        if change < min_change
+            min_change = change
+        end
+
+        if change < tolerance
+            if verbose
+                println("\tConverged after $iter iterations")
+            end
             return cost
         end
 
@@ -336,7 +394,10 @@ function optimized_indirectAMLS(
     end
 
     # If max_iterations reached without convergence
-    println("Max iterations reached without convergence")
+    if verbose
+        println("\tMin. Change: $min_change - Tolerance: $tolerance")
+        println("\tWarning: Indirect AMLS did not converge within max_iterations")
+    end
     return cost_prev
 end
 
